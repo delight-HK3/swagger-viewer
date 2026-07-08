@@ -1,4 +1,4 @@
-rootProject.name = "swagger-preview-plugin"
+rootProject.name = "swagger-viewer"
 
 pluginManagement {
     repositories {
