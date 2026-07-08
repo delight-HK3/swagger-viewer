@@ -1,0 +1,19 @@
+<idea-plugin>
+    <id>com.example.swaggerViewer</id>
+    <name>Swagger Viewer</name>
+    <vendor>dabean</vendor>
+
+    <extensions defaultExtensionNs="com.intellij">
+
+        <!-- Tool Window: Spring 소스 파일 어노테이션 미리보기 -->
+        <toolWindow
+                id="Swagger Viewer"
+                anchor="right"
+                factoryClass="com.example.swaggerViewer.view.SwaggerViewerToolWindowFactory"/>
+
+        <!-- Split Editor: YAML/JSON 스펙 파일 직접 미리보기 -->
+        <fileEditorProvider
+                implementation="com.example.swaggerViewer.view.SwaggerSplitEditorProvider"/>
+
+    </extensions>
+</idea-plugin>
