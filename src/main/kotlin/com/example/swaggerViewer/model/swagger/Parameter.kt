@@ -1,4 +1,4 @@
-package com.example.swaggerViewer.model
+package com.example.swaggerViewer.model.swagger
 
 /**
  * HTTP 엔드포인트의 파라미터 하나를 표현한다.
@@ -12,12 +12,12 @@ package com.example.swaggerViewer.model
  * 소비: [com.example.swaggerViewer.service.OpenApiSpecBuilder]
  *   - OpenAPI 3.0 parameters 배열의 각 항목으로 직렬화된다.
  */
-data class ParameterInfo(
+data class Parameter(
     val name: String,
     /** OpenAPI "in" 필드값. "path" / "query" / "header" / "cookie" */
     val location: String,
     val description: String?,
     val required: Boolean,
     val example: String? = null,
-    val schema: SchemaInfo? = null
+    val schema: Schema? = null
 )

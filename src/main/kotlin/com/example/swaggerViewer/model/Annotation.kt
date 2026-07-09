@@ -2,6 +2,7 @@ package com.example.swaggerViewer.model
 
 /** 파싱 대상 어노테이션의 FQN(패키지 포함 전체 클래스명) 목록 */
 enum class Annotation(val fqn: String) {
+
     // Spring MVC 컨트롤러 식별용
     REST_CONTROLLER("org.springframework.web.bind.annotation.RestController"),
     CONTROLLER("org.springframework.web.bind.annotation.Controller"),
@@ -37,12 +38,7 @@ enum class Annotation(val fqn: String) {
     PARAMETER("io.swagger.v3.oas.annotations.Parameter"),
     PARAMETERS("io.swagger.v3.oas.annotations.Parameters"),
 
-    // Swagger/OpenAPI 문서화 — 요청 바디 (OAS 어노테이션, Spring과 별개)
-    REQUEST_BODY_OAS("io.swagger.v3.oas.annotations.parameters.RequestBody"),
-
     // Swagger/OpenAPI 문서화 — 보안
     SECURITY_REQUIREMENT("io.swagger.v3.oas.annotations.security.SecurityRequirement"),
 
-    // Swagger/OpenAPI 문서화 — 콜백 (현재 파싱 미지원, FQN 등록만)
-    CALLBACK("io.swagger.v3.oas.annotations.callbacks.Callback"),
 }

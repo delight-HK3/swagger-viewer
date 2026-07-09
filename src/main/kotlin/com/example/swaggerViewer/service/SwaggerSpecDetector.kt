@@ -33,7 +33,6 @@ object SwaggerSpecDetector {
         }
     }
 
-    // 정규식으로
     private fun containsSpecMarker(text: String): Boolean {
         val yamlOpenApi = Regex("(?m)^\\s*openapi\\s*:\\s*['\"]?\\d")
         val yamlSwagger = Regex("(?m)^\\s*swagger\\s*:\\s*['\"]?\\d")

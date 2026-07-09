@@ -1,26 +1,30 @@
 package com.example.swaggerViewer.service
 
-import com.example.swaggerViewer.model.ExternalDocInfo
-import com.example.swaggerViewer.model.HeaderInfo
-import com.example.swaggerViewer.model.LinkInfo
-import com.example.swaggerViewer.model.OperationInfo
-import com.example.swaggerViewer.model.ParameterInfo
-import com.example.swaggerViewer.model.RequestBodyInfo
-import com.example.swaggerViewer.model.ResponseInfo
 import com.example.swaggerViewer.model.ScanResult
-import com.example.swaggerViewer.model.SchemaInfo
-import com.example.swaggerViewer.model.SecurityRequirementInfo
-import com.example.swaggerViewer.model.ServerInfo
+import com.example.swaggerViewer.model.swagger.ApiResponse
+import com.example.swaggerViewer.model.swagger.ExternalDocumentation
+import com.example.swaggerViewer.model.swagger.Header
+import com.example.swaggerViewer.model.swagger.Link
+import com.example.swaggerViewer.model.swagger.Operation
+import com.example.swaggerViewer.model.swagger.Parameter
+import com.example.swaggerViewer.model.swagger.RequestBody
+import com.example.swaggerViewer.model.swagger.Schema
+import com.example.swaggerViewer.model.swagger.SecurityRequirement
+import com.example.swaggerViewer.model.swagger.Server;
 import com.fasterxml.jackson.databind.ObjectMapper
 
 /**
- * PsiSwaggerScanner.ScanResult를 OpenAPI 3.0.0 JSON 문자열로 변환한다.
- * 필드 순서를 deterministic하게 유지하기 위해 LinkedHashMap을 사용한다.
+ * [ScanResult]를 OpenAPI 3.0.0 JSON 문자열로 직렬화한다.
+ *
+ * 각 build* 메서드는 OpenAPI 스펙 객체 하나를 Map으로 변환하며,
+ * 최종적으로 Jackson ObjectMapper가 JSON 문자열로 출력한다.
+ * 필드 삽입 순서 = 스펙 출력 순서이므로 LinkedHashMap을 일관되게 사용한다.
  */
 class OpenApiSpecBuilder {
 
     private val mapper = ObjectMapper()
 
+    /** ScanResult 전체를 OpenAPI 3.0.0 JSON 문자열로 변환한다. */
     fun build(result: ScanResult): String {
         val spec = LinkedHashMap<String, Any>()
         spec["openapi"] = "3.0.0"
@@ -52,7 +56,8 @@ class OpenApiSpecBuilder {
         return mapper.writeValueAsString(spec)
     }
 
-    private fun buildOperation(op: OperationInfo): Map<String, Any> = buildMap {
+    /** @Operation → OpenAPI paths.[path].[method] 객체 */
+    private fun buildOperation(op: Operation): Map<String, Any> = buildMap {
         if (op.tags.isNotEmpty()) put("tags", op.tags)
         if (op.summary != null) put("summary", op.summary)
         if (op.description != null) put("description", op.description)
@@ -66,12 +71,14 @@ class OpenApiSpecBuilder {
         if (op.servers.isNotEmpty()) put("servers", op.servers.map { buildServer(it) })
     }
 
-    private fun buildExternalDoc(doc: ExternalDocInfo): Map<String, Any> = buildMap {
+    /** @ExternalDocumentation → externalDocs 객체 */
+    private fun buildExternalDoc(doc: ExternalDocumentation): Map<String, Any> = buildMap {
         put("url", doc.url)
         if (!doc.description.isNullOrBlank()) put("description", doc.description)
     }
 
-    private fun buildParameter(p: ParameterInfo): Map<String, Any> = buildMap {
+    /** @Parameter → parameters 배열 항목 */
+    private fun buildParameter(p: Parameter): Map<String, Any> = buildMap {
         put("name", p.name)
         put("in", p.location)
         put("required", p.required)
@@ -80,8 +87,11 @@ class OpenApiSpecBuilder {
         put("schema", if (p.schema != null) buildSchema(p.schema) else mapOf("type" to "string"))
     }
 
-    private fun buildSchema(schema: SchemaInfo): Map<String, Any> {
-        // implementation은 $ref로 변환. $ref와 type을 동시에 쓸 수 없으므로 우선 처리.
+    /**
+     * @Schema → 인라인 스키마 또는 $ref 객체.
+     * implementation이 있으면 $ref 우선 — $ref와 type을 동시에 쓸 수 없다.
+     */
+    private fun buildSchema(schema: Schema): Map<String, Any> {
         if (schema.implementation != null) return mapOf("\$ref" to "#/components/schemas/${schema.implementation}")
         return buildMap {
             if (schema.type != null) put("type", schema.type)
@@ -93,7 +103,8 @@ class OpenApiSpecBuilder {
         }
     }
 
-    private fun buildRequestBody(rb: RequestBodyInfo): Map<String, Any> = buildMap {
+    /** @RequestBody → requestBody 객체. contentSchema가 있으면 $ref, 없으면 generic object. */
+    private fun buildRequestBody(rb: RequestBody): Map<String, Any> = buildMap {
         if (rb.description != null) put("description", rb.description)
         put("required", rb.required)
         val schemaMap: Map<String, Any> = if (rb.contentSchema != null)
@@ -103,12 +114,14 @@ class OpenApiSpecBuilder {
         put("content", mapOf("application/json" to mapOf("schema" to schemaMap)))
     }
 
-    private fun buildResponses(responses: Map<String, ResponseInfo>): Map<String, Any> {
+    /** responseCode → ApiResponse 맵을 OpenAPI responses 객체로 변환. 비어 있으면 "200 OK" 기본값. */
+    private fun buildResponses(responses: Map<String, ApiResponse>): Map<String, Any> {
         if (responses.isEmpty()) return mapOf("200" to mapOf("description" to "OK"))
-        return responses.mapValues { (_, r) -> buildResponse(r) }
+        return responses.mapValues { (_, r) -> buildApiResponse(r) }
     }
 
-    private fun buildResponse(r: ResponseInfo): Map<String, Any> = buildMap {
+    /** @ApiResponse → responses.[code] 객체 */
+    private fun buildApiResponse(r: ApiResponse): Map<String, Any> = buildMap {
         put("description", r.description)
         if (r.contentSchema != null) {
             put("content", mapOf(
@@ -121,21 +134,25 @@ class OpenApiSpecBuilder {
         if (r.links.isNotEmpty()) put("links", r.links.mapValues { (_, l) -> buildLink(l) })
     }
 
-    private fun buildHeader(h: HeaderInfo): Map<String, Any> = buildMap {
+    /** @Header → headers.[name] 객체 */
+    private fun buildHeader(h: Header): Map<String, Any> = buildMap {
         if (h.description != null) put("description", h.description)
         put("schema", if (h.schema != null) buildSchema(h.schema) else mapOf("type" to "string"))
     }
 
-    private fun buildLink(l: LinkInfo): Map<String, Any> = buildMap {
+    /** @Link → links.[name] 객체 */
+    private fun buildLink(l: Link): Map<String, Any> = buildMap {
         if (l.description != null) put("description", l.description)
         if (l.operationId != null) put("operationId", l.operationId)
         if (l.parameters.isNotEmpty()) put("parameters", l.parameters)
     }
 
-    private fun buildSecurityRequirement(s: SecurityRequirementInfo): Map<String, Any> =
+    /** @SecurityRequirement → security 배열 항목. { name: [scopes] } 형태. */
+    private fun buildSecurityRequirement(s: SecurityRequirement): Map<String, Any> =
         mapOf(s.name to s.scopes)
 
-    private fun buildServer(s: ServerInfo): Map<String, Any> = buildMap {
+    /** @Server → servers 배열 항목 */
+    private fun buildServer(s: Server): Map<String, Any> = buildMap {
         put("url", s.url)
         if (!s.description.isNullOrBlank()) put("description", s.description)
         if (s.variables.isNotEmpty()) {

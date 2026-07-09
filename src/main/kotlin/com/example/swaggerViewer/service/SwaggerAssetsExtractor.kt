@@ -22,7 +22,6 @@ object SwaggerAssetsExtractor {
     @Volatile
     private var cachedDir: File? = null
 
-    //
     @Synchronized
     fun ensureExtracted(): File {
         cachedDir?.let { if (it.exists()) return it }

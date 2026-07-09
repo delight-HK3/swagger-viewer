@@ -1,4 +1,4 @@
-package com.example.swaggerViewer.model
+package com.example.swaggerViewer.model.swagger
 
 /**
  * OpenAPI Tag 하나를 표현한다.
@@ -9,8 +9,8 @@ package com.example.swaggerViewer.model
  * 소비: [com.example.swaggerViewer.service.OpenApiSpecBuilder]
  *   - OpenAPI 3.0 최상위 "tags" 배열의 항목으로 직렬화된다.
  */
-data class TagInfo(
+data class Tag(
     val name: String,
     val description: String?,
-    val externalDocs: ExternalDocInfo? = null
+    val externalDocs: ExternalDocumentation? = null
 )
