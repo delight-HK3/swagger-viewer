@@ -1,5 +1,9 @@
 package com.example.swaggerViewer.model
 
+import com.example.swaggerViewer.model.swagger.Operation
+import com.example.swaggerViewer.model.swagger.Server
+import com.example.swaggerViewer.model.swagger.Tag
+
 /**
  * 프로젝트 전체를 PSI 스캔한 결과물. 스캐너와 빌더 사이의 경계 DTO 역할을 한다.
  *
@@ -13,14 +17,14 @@ package com.example.swaggerViewer.model
  * @property version     OpenAPI info.version. @OpenAPIDefinition이 없으면 "1.0.0" 고정.
  * @property description OpenAPI info.description. @OpenAPIDefinition.info.description에서 추출.
  * @property servers     OpenAPI servers 배열. @OpenAPIDefinition.servers에서 추출.
- * @property paths       path → (httpMethod → OperationInfo) 의 2단계 맵.
- *                       예: "/users" → { "get" → OperationInfo(...) }
+ * @property paths       path → (httpMethod → Operation) 의 2단계 맵.
+ *                       예: "/users" → { "get" → Operation(...) }
  */
 data class ScanResult(
     val title: String,
     val version: String,
     val description: String? = null,
-    val servers: List<ServerInfo> = emptyList(),
-    val tags: List<TagInfo>,
-    val paths: Map<String, Map<String, OperationInfo>>
+    val servers: List<Server> = emptyList(),
+    val tags: List<Tag>,
+    val paths: Map<String, Map<String, Operation>>
 )

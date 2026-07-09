@@ -25,11 +25,14 @@ dependencies {
         bundledPlugin("com.intellij.java")
 
         instrumentationTools()
+        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
     }
 
     // YAML -> JSON 변환용 (IntelliJ 플랫폼에 Jackson이 포함되어 있지만, 명시적으로 추가해 버전 충돌 방지)
     implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.17.2")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
+
+    testImplementation("junit:junit:4.13.2")
 }
 
 intellijPlatform {
