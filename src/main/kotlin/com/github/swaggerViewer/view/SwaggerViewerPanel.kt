@@ -4,6 +4,7 @@ import com.github.swaggerViewer.service.annotation.SwaggerPreviewPipeline
 import com.github.swaggerViewer.service.common.SwaggerAssetsExtractor
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.event.DocumentEvent
@@ -20,13 +21,20 @@ import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
-import com.intellij.util.Alarm
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.awt.BorderLayout
 import java.awt.FlowLayout
 import javax.swing.BorderFactory
 import javax.swing.JButton
 import javax.swing.JPanel
 import javax.swing.SwingConstants
+import kotlin.jvm.Throws
 
 /**
  * Live preview panel inside the Tool Window.
@@ -37,9 +45,14 @@ import javax.swing.SwingConstants
 class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
 
     private val browser: JBCefBrowser? = if (JBCefApp.isSupported()) JBCefBrowser() else null
-    // SWING_THREAD so doRefresh() runs on EDT, which is required for PsiDocumentManager.commitAllDocuments()
+    // EDT so doRefresh() runs on EDT, which is required for PsiDocumentManager.commitAllDocuments()
     // and for submitting NonBlockingReadAction from the correct threading context.
-    private val alarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
+    //
+    // Bound to this panel's Disposable lifecycle: dispose() calls renderPreviewScope.cancel(),
+    // so pending refreshes don't fire after the panel/browser has already been torn down.
+    private val renderPreviewScope = CoroutineScope(Dispatchers.EDT + SupervisorJob())
+    private var renderPreviewJob: Job? = null
+
     private val pipeline = SwaggerPreviewPipeline(project)
 
     private val statusLabel = JBLabel("Scanning...", SwingConstants.LEFT).apply {
@@ -57,9 +70,12 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
         scheduleRefresh(immediate = true)
     }
 
-    // Assembles the Tool Window panel UI.
-    // NORTH: toolbar consisting of a refresh button and a scan status label.
-    // CENTER: JBCefBrowser if JCEF is supported, otherwise a fallback message label.
+    /**
+     * Assembles the Tool Window panel UI.
+     *
+     * * NORTH: toolbar consisting of a refresh button and a scan status label.
+     * * CENTER: JBCefBrowser if JCEF is supported, otherwise a fallback message label.
+     */
     private fun buildUi() {
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
             val refreshBtn = JButton("Refresh").apply {
@@ -70,14 +86,14 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
         }
         add(toolbar, BorderLayout.NORTH)
 
-        if (browser != null) {
-            add(browser.component, BorderLayout.CENTER)
-        } else {
-            add(
-                JBLabel("JCEF is not supported, so the preview cannot be displayed.", SwingConstants.CENTER),
-                BorderLayout.CENTER
-            )
-        }
+        this.browser
+            ?.let { add(it.component, BorderLayout.CENTER) }
+            ?: run {
+                add(JBLabel(
+                    "JCEF is not supported, so the preview cannot be displayed.",
+                    SwingConstants.CENTER
+                ), BorderLayout.CENTER)
+            }
     }
 
     // Reacts immediately while typing: detects .java/.kt file modifications via document change events (not save)
@@ -124,16 +140,22 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
     // Schedules a preview refresh.
     // When called while typing, applies a debounce (500ms) to avoid a full reparse on every keystroke.
     // If immediate=true (button click / initial load), invalidates the cache and runs after 100ms.
-    // Duplicate requests are cleared via Alarm.cancelAllRequests() so only the latest request ever runs.
+    // Duplicate requests are cleared via renderPreviewJob.cancel() so only the latest request ever runs.
     private fun scheduleRefresh(immediate: Boolean = false) {
-        alarm.cancelAllRequests()
-        // A forced refresh (button click) invalidates the cache to guarantee a re-render
-        if (immediate) lastSpecJson = null
-        // Debounce: delay execution so a full reparse doesn't happen on every keystroke
-        alarm.addRequest({ doRefresh() }, if (immediate) 100 else 500)
+        this.renderPreviewJob?.cancel()
+        this.renderPreviewJob = renderPreviewScope.launch {
+            // A forced refresh (button click) invalidates the cache to guarantee a re-render
+            if (immediate) lastSpecJson = null
+
+            // Debounce: delay execution so a full reparse doesn't happen on every keystroke
+            val delayMillis = if (immediate) 100L else 500L
+            delay(timeMillis = delayMillis)
+
+            doRefresh()
+        }
     }
 
-    // Runs on EDT (SWING_THREAD alarm).
+    // Runs on EDT (renderPreviewScope's Dispatchers.EDT).
     // Commits all open documents first so PSI reflects the latest edits, then submits
     // a NonBlockingReadAction from the EDT — the recommended submission context in the
     // IntelliJ Platform (submitting from a pooled thread causes withDocumentsCommitted
@@ -141,17 +163,28 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
     private fun doRefresh() {
         if (browser == null || project.isDisposed) return
         PsiDocumentManager.getInstance(project).commitAllDocuments()
+
         ReadAction.nonBlocking<Unit> { performScan() }
             .expireWhen { project.isDisposed }
             .inSmartMode(project)
+            .coalesceBy(this)
             .submit(AppExecutorUtil.getAppExecutorService())
     }
 
-    // Annotation parsing → JSON conversion → rendering. Must be called within a ReadAction context.
+    /**
+     * Annotation parsing → JSON conversion → rendering.
+     * Must be called within a ReadAction context.
+     *
+     * @throws ProcessCanceledException
+     */
+    @Throws(ProcessCanceledException::class)
     private fun performScan() {
-        try {
+        runCatching {
             val result = pipeline.scan()
             if (result.paths.isEmpty()) {
+                // Reset the cache so a later non-empty spec that happens to serialize identically
+                // to the one shown before this empty state is still treated as a change and rendered.
+                lastSpecJson = null
                 setStatus("No @RestController endpoints found")
                 renderEmpty()
                 return
@@ -162,12 +195,13 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
                 setStatus("Static analysis — ${result.paths.size} paths")
                 renderSpec(specJson)
             }
-        } catch (e: ProcessCanceledException) {
-            // NonBlockingReadAction retries automatically when PCE propagates — do NOT swallow it.
-            throw e
-        } catch (e: Exception) {
-            setStatus("Error: ${e.message?.take(80)}")
-            renderError(e.message ?: "Unknown error")
+
+        }.onFailure { e ->
+            if (e is ProcessCanceledException) { throw e }
+            else {
+                setStatus("Error: ${e.message?.take(80)}")
+                renderError(e.message ?: "Unknown error")
+            }
         }
     }
 
@@ -181,8 +215,12 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
     private fun renderSpec(specJson: String) {
         ApplicationManager.getApplication().invokeLater {
             val assetsDir = SwaggerAssetsExtractor.ensureExtracted()
-            // Build a platform-independent file:// URL with File.toURI() — avoids Windows backslash/double-slash issues
-            val baseUrl = assetsDir.toPath().resolve("index.html").toUri().toString()
+            // Build a platform-independent file:// URL with File.toURI() — avoids Windows backslash/double-slash issues.
+            // A cache-busting query suffix is required: JBCefBrowserBase.loadUrlImpl() silently no-ops
+            // loadHTML() when the url string is identical to the previously loaded one, which a fixed
+            // file:// baseUrl always is across renders — the browser would keep showing stale content
+            // even though fresh HTML was passed in. The suffix doesn't affect relative asset resolution.
+            val baseUrl = assetsDir.toPath().resolve("index.html").toUri().toString() + "?t=${System.nanoTime()}"
             browser?.loadHTML(SwaggerPreviewHtmlBuilder.buildPreviewHtml(specJson), baseUrl)
         }
     }
@@ -207,7 +245,9 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
     }
 
     // Releases the JCEF browser resource when the panel closes. Listener cleanup is handled automatically via the Disposable link.
+    // Cancels the coroutine scope first so no pending/in-flight refresh touches the browser after it's disposed.
     override fun dispose() {
+        renderPreviewScope.cancel()
         browser?.dispose()
     }
 }
