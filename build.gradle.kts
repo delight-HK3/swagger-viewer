@@ -17,7 +17,7 @@ repositories {
 dependencies {
     intellijPlatform {
         // IntelliJ IDEA Community, 2024.2 기준. 필요시 버전 변경 가능.
-        create("IC", "2024.2")
+        create("IC", "2024.3")
 
         // JCEF, YAML 플러그인 의존성을 사용하려면 bundledPlugin 추가
         bundledPlugin("org.jetbrains.plugins.yaml")
@@ -38,6 +38,7 @@ dependencies {
 intellijPlatform {
     pluginConfiguration {
         version = project.version.toString()
+        description = providers.fileContents(layout.projectDirectory.file("docs/marketplaces/jetbrains/en.md")).asText
         ideaVersion {
             sinceBuild = "242"
             untilBuild = "243.*"

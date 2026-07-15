@@ -1,15 +1,15 @@
 <idea-plugin>
-    <id>com.example.swaggerViewer</id>
+    <id>com.github.swaggerViewer</id>
     <name>Swagger Viewer</name>
-    <vendor>dabean</vendor>
+    <vendor>delight-HK3</vendor>
 
     <extensions defaultExtensionNs="com.intellij">
 
-        <!-- Tool Window: Spring 소스 파일 어노테이션 미리보기 + YAML/JSON 스펙 파일 미리보기 -->
+        <!-- Tool Window: Spring source file annotation preview + YAML/JSON spec file preview -->
         <toolWindow
                 id="Swagger Viewer"
                 anchor="right"
-                factoryClass="com.example.swaggerViewer.view.SwaggerViewerToolWindowFactory"/>
+                factoryClass="com.github.swaggerViewer.view.SwaggerViewerToolWindowFactory"/>
 
     </extensions>
 </idea-plugin>
