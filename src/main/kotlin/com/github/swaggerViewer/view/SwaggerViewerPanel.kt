@@ -4,302 +4,192 @@ import com.github.swaggerViewer.service.annotation.SwaggerPreviewPipeline
 import com.github.swaggerViewer.service.common.SwaggerAssetsExtractor
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.EDT
-import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.application.EDT // [수정 포인트] 이 임포트가 있어야 Dispatchers.EDT 가 올바르게 확장 함수로 동작합니다.
+import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.application.readAction
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.fileEditor.FileDocumentManager
-import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
-import com.intellij.psi.PsiDocumentManager
-import com.intellij.util.concurrency.AppExecutorUtil
+import com.intellij.openapi.project.guessProjectDir
+import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
+import com.intellij.psi.PsiDocumentManager
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.FlowPreview
 import java.awt.BorderLayout
 import java.awt.FlowLayout
+import java.util.concurrent.atomic.AtomicReference
 import javax.swing.BorderFactory
 import javax.swing.JButton
 import javax.swing.JPanel
 import javax.swing.SwingConstants
-import kotlin.jvm.Throws
+import kotlin.time.Duration.Companion.milliseconds
 
-/**
- * Live preview panel inside the Tool Window.
- * Renders by parsing @RestController/@Controller annotations through PSI static analysis only.
- * Reacts while typing: detects document changes via EditorFactory's DocumentListener (not a file-save event).
- * PSI parsing runs on a background thread via [ReadAction.nonBlocking]; only rendering runs on the EDT (no EDT blocking).
- */
+private val LOG = Logger.getInstance(SwaggerViewerPanel::class.java)
+
 class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
 
     private val browser: JBCefBrowser? = if (JBCefApp.isSupported()) JBCefBrowser() else null
 
-    /**
-     *  EDT so [doRefresh] runs on EDT, which is required for [PsiDocumentManager.commitAllDocuments]
-     *  and for submitting NonBlockingReadAction from the correct threading context.
-     *
-     *  Bound to this panel's Disposable lifecycle: [dispose] calls renderPreviewScope.cancel(),
-     *  so pending refreshes don't fire after the panel/browser has already been torn down.
-     */
-    private val renderPreviewScope = CoroutineScope(Dispatchers.EDT + SupervisorJob())
-    private var renderPreviewJob: Job? = null
+    private val panelJob = SupervisorJob()
+    private val coroutineScope = CoroutineScope(panelJob + Dispatchers.Default)
+
+    private val refreshRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     private val pipeline = SwaggerPreviewPipeline(project)
-
-    private val statusLabel = JBLabel("Scanning...", SwingConstants.LEFT).apply {
+    private val statusLabel = JBLabel("Ready", SwingConstants.LEFT).apply {
         border = BorderFactory.createEmptyBorder(0, 8, 0, 8)
     }
 
-    @Volatile
-    private var lastSpecJson: String? = null
+    @Volatile private var disposed = false
+    private val lastSpecJson = AtomicReference<String?>(null)
 
-    // Initial plugin setup
     init {
-        buildUi() // Assemble the UI
-        setupDocumentListener() // Typing listener
-        setupFileWatcher() // File rename/create/delete
-        scheduleRefresh(immediate = true)
+        if (browser != null) {
+            com.intellij.openapi.util.Disposer.register(this, browser)
+        }
+
+        buildUi()
+        setupDocumentListener()
+        setupFileWatcher()
+        startRefreshPipeline()
+
+        // [수정] 일반 패널도 완벽히 레이아웃 트리에 마운트된 직후 스캔을 돌리도록 수정
+        ApplicationManager.getApplication().invokeLater({
+            if (!project.isDisposed && !disposed) {
+                triggerRefresh()
+            }
+        }, ModalityState.any())
     }
 
-    /**
-     * Assembles the Tool Window panel UI.
-     *
-     * * NORTH: toolbar consisting of a refresh button and a scan status label.
-     * * CENTER: [JBCefBrowser] if JCEF is supported, otherwise a fallback message label.
-     */
     private fun buildUi() {
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
             val refreshBtn = JButton("Refresh").apply {
-                addActionListener { scheduleRefresh(immediate = true) }
+                addActionListener {
+                    LOG.info("Manual refresh triggered")
+                    lastSpecJson.set(null)
+                    triggerRefresh()
+                }
             }
             add(refreshBtn)
             add(statusLabel)
         }
         add(toolbar, BorderLayout.NORTH)
-
-        this.browser
-            ?.let { add(it.component, BorderLayout.CENTER) }
-            ?: run {
-                add(JBLabel(
-                    "JCEF is not supported, so the preview cannot be displayed.",
-                    SwingConstants.CENTER
-                ), BorderLayout.CENTER)
-            }
+        this.browser?.let { add(it.component, BorderLayout.CENTER) }
     }
 
-    /**
-     * Reacts immediately while typing: detects
-     * .java/.kt file modifications via document change events (not save)
-     **/
     private fun setupDocumentListener() {
-        EditorFactory.getInstance().eventMulticaster.addDocumentListener(
-            object : DocumentListener {
-                override fun documentChanged(event: DocumentEvent) {
-                    if (project.isDisposed) return
-                    val vFile = FileDocumentManager.getInstance().getFile(event.document) ?: return
-                    if (!isProjectSourceFile(vFile)) return
-                    scheduleRefresh()
-                }
-            },
-            this // Removed once this listener's work is done
-        )
-    }
-
-    /**
-     * Also detects structural changes like file create/delete/rename
-     * (VFS events instead of DocumentListener)
-     */
-    private fun setupFileWatcher() {
-        project.messageBus.connect(this).subscribe(
-            VirtualFileManager.VFS_CHANGES,
-            object : BulkFileListener {
-                override fun after(events: List<VFileEvent>) {
-                    if (events.any { isRelevantFileEvent(it) }) scheduleRefresh()
+        EditorFactory.getInstance().eventMulticaster.addDocumentListener(object : DocumentListener {
+            override fun documentChanged(event: DocumentEvent) {
+                if (project.isDisposed || disposed) return
+                val vFile = FileDocumentManager.getInstance().getFile(event.document) ?: return
+                if (isProjectSourceFile(vFile)) {
+                    LOG.info("Document changed: ${vFile.name}")
+                    triggerRefresh()
                 }
             }
-        )
+        }, this)
     }
 
-    /**
-     * Checks whether the file belongs to this project
-     * and is a Java/Kotlin source file
-     *
-     * @param event the VFS event to check
-     */
-    private fun isRelevantFileEvent(event: VFileEvent): Boolean {
-        val file = event.file ?: return false
-        return isProjectSourceFile(file)
+    private fun setupFileWatcher() {
+        project.messageBus.connect(this).subscribe(VirtualFileManager.VFS_CHANGES, object : BulkFileListener {
+            override fun after(events: List<VFileEvent>) {
+                if (project.isDisposed || disposed) return
+                if (events.any { it.file != null && isProjectSourceFile(it.file!!) }) {
+                    LOG.info("VFS change detected")
+                    triggerRefresh()
+                }
+            }
+        })
     }
 
-    /**
-     * Determines whether the file is a Java/Kotlin source file
-     * belonging to this project
-     *
-     * @param file the file to check
-     */
     private fun isProjectSourceFile(file: VirtualFile): Boolean {
         val ext = file.extension?.lowercase()
         if (ext != "java" && ext != "kt") return false
-        val basePath = project.basePath ?: return false
-        return file.path.startsWith(basePath)
+        val projectDir = project.guessProjectDir() ?: return false
+        return VfsUtil.isAncestor(projectDir, file, false)
     }
 
-    /**
-     * Schedules a preview refresh.
-     *
-     * When called while typing, applies a debounce (500ms) to avoid a full reparse on every keystroke.
-     * If immediate=true (button click / initial load), invalidates the cache and runs after 100ms.
-     * Duplicate requests are cleared via renderPreviewJob.cancel() so only the latest request ever runs.
-     *
-     * @param immediate is refresh render preview ASAP?
-     * - True: refresh preview ASAP
-     * - False: refresh preview Lazy
-     */
-    private fun scheduleRefresh(immediate: Boolean = false) {
-        this.renderPreviewJob?.cancel()
-        this.renderPreviewJob = renderPreviewScope.launch {
-            // A forced refresh (button click) invalidates the cache to guarantee a re-render
-            if (immediate) lastSpecJson = null
+    private fun triggerRefresh() {
+        if (!panelJob.isActive || disposed) return
+        refreshRequests.tryEmit(Unit)
+    }
 
-            // Debounce: delay execution so a full reparse doesn't happen on every keystroke
-            val delayMillis = if (immediate) 100L else 500L
-            delay(timeMillis = delayMillis)
+    @OptIn(FlowPreview::class)
+    private fun startRefreshPipeline() {
+        coroutineScope.launch {
+            refreshRequests
+                .debounce(800.milliseconds)
+                .collectLatest {
+                    if (project.isDisposed || disposed) return@collectLatest
 
-            doRefresh()
+                    try {
+                        // [수정 포인트] Dispatchers.EDT 문법으로 통일하여 수신 객체 불일치(Receiver mismatch) 에러를 방지합니다.
+                        withContext(Dispatchers.EDT) {
+                            PsiDocumentManager.getInstance(project).commitAllDocuments()
+                        }
+
+                        val specJson = readAction {
+                            if (project.isDisposed) "" else pipeline.buildSpec(pipeline.scan())
+                        }
+
+                        if (specJson != lastSpecJson.get() && specJson.isNotEmpty()) {
+                            lastSpecJson.set(specJson)
+                            withContext(Dispatchers.EDT) {
+                                renderSpec(specJson)
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        if (t !is CancellationException) {
+                            LOG.error("Scan error", t)
+                            withContext(Dispatchers.EDT) {
+                                renderError("Error generating Swagger spec: ${t.message}")
+                            }
+                        }
+                    }
+                }
         }
     }
 
-    /**
-     * Runs on EDT ([renderPreviewScope]'s [Dispatchers.EDT]).
-     * Commits all open documents first so PSI reflects the latest edits, then submits
-     * a NonBlockingReadAction from the EDT — the recommended submission context in the
-     * IntelliJ Platform (submitting from a pooled thread causes withDocumentsCommitted
-     * to lose the correct modality state and silently never fire).
-     */
-    private fun doRefresh() {
-        if (browser == null || project.isDisposed) return
-        PsiDocumentManager.getInstance(project).commitAllDocuments()
+    private suspend fun renderSpec(specJson: String) {
+        if (disposed || browser == null || project.isDisposed) return
 
-        ReadAction.nonBlocking<Unit> { performScan() }
-            .expireWhen { project.isDisposed }
-            .inSmartMode(project)
-            .coalesceBy(this)
-            .submit(AppExecutorUtil.getAppExecutorService())
-    }
-
-    /**
-     * Annotation parsing → JSON conversion → rendering.
-     * Must be called within a ReadAction context.
-     *
-     * @throws ProcessCanceledException if the enclosing [ReadAction.nonBlocking] is cancelled
-     *   mid-scan (e.g. a write action starts or the project is disposed); rethrown as-is so the
-     *   platform can retry the scan instead of treating it as a real failure.
-     */
-    @Throws(ProcessCanceledException::class)
-    private fun performScan() {
-        runCatching {
-            val result = pipeline.scan()
-            if (result.paths.isEmpty()) {
-                // Reset the cache so a later non-empty spec that happens to serialize identically
-                // to the one shown before this empty state is still treated as a change and rendered.
-                lastSpecJson = null
-                setStatus("No @RestController endpoints found")
-                renderEmpty()
-                return
-            }
-            val specJson = pipeline.buildSpec(result)
-            if (specJson != lastSpecJson) {
-                lastSpecJson = specJson
-                setStatus("Static analysis — ${result.paths.size} paths")
-                renderSpec(specJson)
-            }
-
-        }.onFailure { e ->
-            if (e is ProcessCanceledException) { throw e }
-            else {
-                setStatus("Error: ${e.message?.take(80)}")
-                renderError(e.message ?: "Unknown error")
-            }
+        val assetsDir = withContext(Dispatchers.IO) {
+            SwaggerAssetsExtractor.ensureExtracted()
         }
+        val baseUrl = "${assetsDir.toPath().resolve("index.html").toUri()}?ts=${System.currentTimeMillis()}"
+
+        browser.loadHTML(SwaggerPreviewHtmlBuilder.buildPreviewHtml(specJson, assetsDir), baseUrl)
+        setStatus("Rendered successfully")
     }
 
-    /**
-     * Updates the status label text at the top of the toolbar.
-     * Runs on the EDT since it's a UI operation.
-     *
-     * @param text the status text to display
-     */
     private fun setStatus(text: String) {
-        ApplicationManager.getApplication().invokeLater { statusLabel.text = text }
+        ApplicationManager.getApplication().invokeLater({
+            if (!disposed && !project.isDisposed) statusLabel.text = text
+        }, ModalityState.any())
     }
 
-    /**
-     * Renders the Swagger UI in the browser once parsing succeeds.
-     * baseUrl must be set so local asset files
-     * like swagger-ui.css can be loaded via relative paths.
-     *
-     * @param specJson the OpenAPI spec, serialized as JSON
-     */
-    private fun renderSpec(specJson: String) {
-        ApplicationManager.getApplication().invokeLater {
-            val assetsDir = SwaggerAssetsExtractor.ensureExtracted()
-            // Build a platform-independent file:// URL with File.toURI() — avoids Windows backslash/double-slash issues.
-            // A cache-busting query suffix is required: JBCefBrowserBase.loadUrlImpl() silently no-ops
-            // loadHTML() when the url string is identical to the previously loaded one, which a fixed
-            // file:// baseUrl always is across renders — the browser would keep showing stale content
-            // even though fresh HTML was passed in. The suffix doesn't affect relative asset resolution.
-            val baseUrl = assetsDir.toPath().resolve("index.html").toUri().toString() + "?t=${System.nanoTime()}"
-            browser?.loadHTML(SwaggerPreviewHtmlBuilder.buildPreviewHtml(specJson), baseUrl)
-        }
-    }
-
-    /**
-     * Shows a message when no `@RestController` endpoints are found.
-     */
-    private fun renderEmpty() {
-        ApplicationManager.getApplication().invokeLater {
-            browser?.loadHTML(
-                SwaggerPreviewHtmlBuilder.buildInfoHtml(
-                    "No Spring Boot endpoints found",
-                    "Check that you have a @RestController or @Controller class with HTTP mapping annotations."
-                )
-            )
-        }
-    }
-
-    /**
-     * Shows an error message in the browser
-     * when an exception occurs during parsing.
-     *
-     * @param message to display error message
-     */
     private fun renderError(message: String) {
-        ApplicationManager.getApplication().invokeLater {
-            browser?.loadHTML(SwaggerPreviewHtmlBuilder.buildErrorHtml(message))
+        if (!disposed && browser != null && !project.isDisposed) {
+            browser.loadHTML(SwaggerPreviewHtmlBuilder.buildErrorHtml(message))
+            setStatus("Error")
         }
     }
 
-    /**
-     * Releases the JCEF browser resource when the panel closes.
-     *
-     * Listener cleanup is handled automatically via the Disposable link.
-     * Cancels the coroutine scope first so no pending/in-flight refresh touches the browser
-     * after it's disposed.
-     */
     override fun dispose() {
-        renderPreviewScope.cancel()
-        browser?.dispose()
+        disposed = true
+        panelJob.cancel()
     }
 }

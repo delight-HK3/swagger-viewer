@@ -1,10 +1,16 @@
 package com.github.swaggerViewer.view
 
 import com.github.swaggerViewer.service.yaml.SwaggerSpecDetector
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.EDT
+import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.application.readAction
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.psi.search.FilenameIndex
@@ -12,85 +18,146 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.PsiSearchHelper
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.content.ContentFactory
-import com.intellij.util.Processor
+import com.intellij.util.ui.JBUI
+import kotlinx.coroutines.*
 import javax.swing.SwingConstants
+import kotlin.coroutines.resume
+
+private val LOG = Logger.getInstance(SwaggerViewerToolWindowFactory::class.java)
 
 class SwaggerViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
-    // Entry point IntelliJ calls when the Tool Window opens.
-    // Waits for indexing (Dumb Mode) to finish, scans the project in the background,
-    // then builds the tabs on the EDT based on the scan result (whether Annotation/YAML files exist).
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        // Analyze the project content after indexing completes and build tabs dynamically.
-        // FilenameIndex and PSI searches are slow operations — must run on a pooled thread, not EDT.
-        DumbService.getInstance(project).runWhenSmart {
-            ApplicationManager.getApplication().executeOnPooledThread {
-                val hasAnnotations = ApplicationManager.getApplication().runReadAction<Boolean> {
-                    hasSwaggerAnnotations(project)
+        val statusLabel = JBLabel("Initializing...", SwingConstants.CENTER).apply {
+            font = JBUI.Fonts.label(14f)
+        }
+
+        val contentFactory = ContentFactory.getInstance()
+        toolWindow.contentManager.removeAllContents(true)
+        toolWindow.contentManager.addContent(contentFactory.createContent(statusLabel, "", false))
+
+        fun setStatus(text: String) {
+            ApplicationManager.getApplication().invokeLater({
+                statusLabel.text = text
+            }, ModalityState.any())
+        }
+
+        val parentDisposable = Disposable { }
+        Disposer.register(toolWindow.disposable, parentDisposable)
+
+        val toolWindowJob = SupervisorJob()
+        // [수정 포인트 1] Dispatchers.EDT를 명확하게 사용할 수 있도록 상단 import와 연계 설정
+        val toolWindowScope = CoroutineScope(Dispatchers.Default + toolWindowJob)
+
+        Disposer.register(parentDisposable) {
+            toolWindowJob.cancel("Tool window disposed")
+        }
+
+        toolWindowScope.launch {
+            try {
+                setStatus("Waiting for index...")
+
+                project.awaitSmartMode()
+
+                if (project.isDisposed) return@launch
+
+                setStatus("Scanning code...")
+
+                val (hasAnnotations, hasYaml) = try {
+                    readAction {
+                        if (project.isDisposed) {
+                            false to false
+                        } else {
+                            hasSwaggerAnnotations(project) to hasSwaggerYamlFiles(project)
+                        }
+                    }
+                } catch (e: Exception) {
+                    LOG.warn("Project or Module disposed during Swagger index scanning.", e)
+                    false to false
                 }
-                val hasYaml = ApplicationManager.getApplication().runReadAction<Boolean> {
-                    hasSwaggerYamlFiles(project)
+
+                if (project.isDisposed) return@launch
+
+                // [수정 포인트 2] Dispatchers.EDT를 직접 명시하여 UI 스레드로 안전하게 전환
+                withContext(Dispatchers.EDT) {
+                    if (!project.isDisposed) {
+                        addTabs(project, toolWindow, hasAnnotations, hasYaml)
+                    }
                 }
-                ApplicationManager.getApplication().invokeLater {
-                    addTabs(project, toolWindow, hasAnnotations, hasYaml)
+            } catch (e: CancellationException) {
+                LOG.info("Swagger viewer initialization was cancelled.")
+            } catch (t: Throwable) {
+                LOG.error("Failed to initialize Swagger Viewer", t)
+                withContext(Dispatchers.EDT) {
+                    if (!project.isDisposed) {
+                        showLoadingOrMessage(toolWindow, "Initialization Error: ${t.message}")
+                    }
                 }
             }
         }
     }
 
-    // Adds tabs to the Tool Window based on the scan result.
-    // Adds an "Annotation" tab if annotation-based specs exist, and a "YAML" tab if
-    // YAML/JSON spec files exist; if neither exists, shows only a single info label.
-    private fun addTabs(
-        project: Project,
-        toolWindow: ToolWindow,
-        hasAnnotations: Boolean,
-        hasYaml: Boolean
-    ) {
+    private suspend fun Project.awaitSmartMode() {
+        if (!DumbService.isDumb(this)) return
+
+        suspendCancellableCoroutine<Unit> { continuation ->
+            DumbService.getInstance(this).runWhenSmart {
+                if (continuation.isActive) {
+                    continuation.resume(Unit)
+                }
+            }
+        }
+    }
+
+    private fun addTabs(project: Project, toolWindow: ToolWindow, hasAnnotations: Boolean, hasYaml: Boolean) {
+        toolWindow.contentManager.removeAllContents(true)
         val contentFactory = ContentFactory.getInstance()
 
         if (hasAnnotations) {
-            val content = contentFactory.createContent(SwaggerViewerPanel(project), "Annotation", false)
-            toolWindow.contentManager.addContent(content)
+            toolWindow.contentManager.addContent(
+                contentFactory.createContent(SwaggerViewerPanel(project), "Annotation", false)
+            )
         }
-
         if (hasYaml) {
-            val content = contentFactory.createContent(SwaggerViewerYamlPanel(project), "YAML", false)
-            toolWindow.contentManager.addContent(content)
+            toolWindow.contentManager.addContent(
+                // [수정 포인트 3] SwaggerViewerYamlPanel 클래스 정의에 맞게
+                // 불필요한 파라미터(assetsDir)를 지우고 오직 project만 단독으로 넘기도록 일치시켰습니다.
+                contentFactory.createContent(SwaggerViewerYamlPanel(project), "YAML", false)
+            )
         }
 
         if (!hasAnnotations && !hasYaml) {
             val label = JBLabel("No Swagger-related files found.", SwingConstants.CENTER)
-            val content = contentFactory.createContent(label, "", false)
-            toolWindow.contentManager.addContent(content)
+            toolWindow.contentManager.addContent(contentFactory.createContent(label, "", false))
         }
     }
 
-    // True if the project has at least one Java/Kotlin file importing swagger annotations or @RestController.
-    // Uses the word index (not AnnotatedElementsSearch) so it works before Gradle sync adds library JARs
-    // to the module classpath — AnnotatedElementsSearch requires the annotation class to be resolvable,
-    // which fails if runWhenSmart fires before dependency JARs are indexed.
+    private fun showLoadingOrMessage(toolWindow: ToolWindow, message: String) {
+        val contentFactory = ContentFactory.getInstance()
+        val label = JBLabel(message, SwingConstants.CENTER)
+        toolWindow.contentManager.removeAllContents(true)
+        toolWindow.contentManager.addContent(contentFactory.createContent(label, "", false))
+    }
+
     private fun hasSwaggerAnnotations(project: Project): Boolean {
         val scope = GlobalSearchScope.projectScope(project)
         val searchHelper = PsiSearchHelper.getInstance(project)
         var found = false
 
-        // "swagger" is a word token inside "io.swagger.v3.oas.annotations" import statements
-        searchHelper.processAllFilesWithWord("swagger", scope, Processor { psiFile ->
+        searchHelper.processAllFilesWithWord("swagger", scope, { psiFile ->
             val ext = psiFile.virtualFile?.extension?.lowercase()
             if (ext == "java" || ext == "kt") { found = true; false } else true
         }, false)
-        if (found) return true
 
-        // Also show the Annotation tab for Spring MVC controllers without explicit swagger imports
-        searchHelper.processAllFilesWithWord("RestController", scope, Processor { psiFile ->
-            val ext = psiFile.virtualFile?.extension?.lowercase()
-            if (ext == "java" || ext == "kt") { found = true; false } else true
-        }, true)
+        if (!found) {
+            searchHelper.processAllFilesWithWord("RestController", scope, { psiFile ->
+                val ext = psiFile.virtualFile?.extension?.lowercase()
+                if (ext == "java" || ext == "kt") { found = true; false } else true
+            }, true)
+        }
         return found
     }
 
-    // True if the project has at least one yaml/yml/json file recognized as an OpenAPI spec
     private fun hasSwaggerYamlFiles(project: Project): Boolean {
         val scope = GlobalSearchScope.projectScope(project)
         return listOf("yaml", "yml", "json").any { ext ->
@@ -98,8 +165,4 @@ class SwaggerViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 .any { SwaggerSpecDetector.isSwaggerOrOpenApiFile(it) }
         }
     }
-
-    // Always exposes the Tool Window (shows the icon regardless of whether Annotation/YAML files exist;
-    // the actual content check is done via a scan in createToolWindowContent).
-    override fun shouldBeAvailable(project: Project): Boolean = true
 }

@@ -6,6 +6,10 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.EDT
+import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.application.readAction
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
@@ -15,41 +19,87 @@ import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiDocumentManager
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
-import com.intellij.util.Alarm
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.FlowPreview
 import java.awt.BorderLayout
+import java.awt.FlowLayout
+import java.util.concurrent.atomic.AtomicReference
+import javax.swing.BorderFactory
+import javax.swing.JButton
 import javax.swing.JPanel
 import javax.swing.SwingConstants
+import kotlin.time.Duration.Companion.milliseconds
 
-/**
- * YAML tab panel in the Tool Window.
- * Detects the OpenAPI YAML/JSON file active in the editor and renders a live preview.
- * Editing happens in IntelliJ's default editor; this panel is a read-only viewer only.
- */
+private val LOG = Logger.getInstance(SwaggerViewerYamlPanel::class.java)
+
 class SwaggerViewerYamlPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
 
     private val browser: JBCefBrowser? = if (JBCefApp.isSupported()) JBCefBrowser() else null
-    private val alarm = Alarm(Alarm.ThreadToUse.POOLED_THREAD, this)
     private val yamlMapper = ObjectMapper(YAMLFactory())
     private val jsonMapper = ObjectMapper()
 
-    @Volatile
-    private var currentFile: VirtualFile? = null
+    private val panelJob = SupervisorJob()
+    private val coroutineScope = CoroutineScope(panelJob + Dispatchers.Default)
+    private val refreshRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    private val statusLabel = JBLabel("Ready", SwingConstants.LEFT).apply {
+        border = BorderFactory.createEmptyBorder(0, 8, 0, 8)
+    }
+
+    @Volatile private var currentFile: VirtualFile? = null
+    @Volatile private var disposed = false
+
+    private val lastSpecJson = AtomicReference<String?>(null)
 
     init {
+        LOG.info("SwaggerViewerYamlPanel initialization started.")
+
+        if (browser != null) {
+            com.intellij.openapi.util.Disposer.register(this, browser)
+        }
+
         buildUi()
         setupDocumentListener()
         setupFileEditorListener()
-        // Render immediately if an OpenAPI file is already active when the panel opens
-        FileEditorManager.getInstance(project).selectedFiles
-            .firstOrNull { SwaggerSpecDetector.isSwaggerOrOpenApiFile(it) }
-            ?.let { switchToFile(it) }
+        startRefreshPipeline()
+
+        // [수정] UI 스레드의 레이아웃 배치가 끝난 직후 최초 렌더링을 시도하도록 지연 처리
+        ApplicationManager.getApplication().invokeLater({
+            if (project.isDisposed || disposed) return@invokeLater
+
+            val activeFile = FileEditorManager.getInstance(project).selectedFiles
+                .firstOrNull { SwaggerSpecDetector.isSwaggerOrOpenApiFile(it) }
+
+            if (activeFile != null) {
+                switchToFile(activeFile)
+            } else {
+                browser?.loadHTML(SwaggerPreviewHtmlBuilder.buildInfoHtml("No File Active", "Please open or focus a Swagger/OpenAPI YAML/JSON file."))
+                setStatus("No File Active")
+            }
+        }, ModalityState.any())
     }
 
-    // Assemble the UI
     private fun buildUi() {
+        val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2)).apply {
+            val refreshBtn = JButton("Refresh").apply {
+                addActionListener {
+                    LOG.info("Manual refresh triggered for YAML/JSON")
+                    lastSpecJson.set(null)
+                    triggerRefresh()
+                }
+            }
+            add(refreshBtn)
+            add(statusLabel)
+        }
+        add(toolbar, BorderLayout.NORTH)
+
         if (browser != null) {
             add(browser.component, BorderLayout.CENTER)
         } else {
@@ -57,25 +107,23 @@ class SwaggerViewerYamlPanel(private val project: Project) : JPanel(BorderLayout
         }
     }
 
-    // Listens to all document changes globally; reacts only when the currently tracked OpenAPI file is edited.
-    // Using EditorFactory.eventMulticaster is more reliable than per-file addDocumentListener because
-    // the Document object is guaranteed to exist when this fires (per-file attachment can silently no-op
-    // if FileDocumentManager.getDocument() returns null before the editor has loaded it).
     private fun setupDocumentListener() {
         EditorFactory.getInstance().eventMulticaster.addDocumentListener(
             object : DocumentListener {
                 override fun documentChanged(event: DocumentEvent) {
-                    if (project.isDisposed) return
+                    if (project.isDisposed || disposed) return
                     val vFile = FileDocumentManager.getInstance().getFile(event.document) ?: return
-                    if (vFile != currentFile) return
-                    scheduleUpdate()
+
+                    if (vFile == currentFile) {
+                        LOG.info("Document changed: ${vFile.name}")
+                        triggerRefresh()
+                    }
                 }
             },
             this
         )
     }
 
-    // When the editor tab switches to an OpenAPI file, replace the tracked file with it.
     private fun setupFileEditorListener() {
         project.messageBus.connect(this).subscribe(
             FileEditorManagerListener.FILE_EDITOR_MANAGER,
@@ -89,55 +137,107 @@ class SwaggerViewerYamlPanel(private val project: Project) : JPanel(BorderLayout
         )
     }
 
-    // Replace the tracked file. The global document listener (set up in setupDocumentListener)
-    // already filters by currentFile, so switching here is sufficient.
     private fun switchToFile(file: VirtualFile) {
         currentFile = file
-        scheduleUpdate(immediate = true)
+        lastSpecJson.set(null)
+        triggerRefresh()
     }
 
-    // Schedules a preview refresh with a 300ms debounce. Cancels the previous request so only the latest one runs during continuous input.
-    private fun scheduleUpdate(immediate: Boolean = false) {
-        if (browser == null) return
-        alarm.cancelAllRequests()
-        alarm.addRequest({ updatePreview() }, if (immediate) 0 else 300)
+    private fun triggerRefresh() {
+        if (!panelJob.isActive || disposed) return
+        refreshRequests.tryEmit(Unit)
     }
 
-    // Reads the current file's text, converts it to JSON, generates Swagger UI HTML, and loads it into the browser.
-    // ReadAction guarantees PSI thread safety; the UI update is delegated to the EDT.
-    private fun updatePreview() {
+    @OptIn(FlowPreview::class)
+    private fun startRefreshPipeline() {
+        coroutineScope.launch {
+            refreshRequests
+                .debounce(800.milliseconds)
+                .collectLatest {
+                    if (project.isDisposed || disposed) return@collectLatest
+
+                    // [수정] 백그라운드 파싱/추출이 본격적으로 시작되기 전에 즉각 UI 상에 상태를 표시합니다.
+                    setStatus("Scanning...")
+
+                    updatePreview()
+                }
+        }
+    }
+
+    private suspend fun updatePreview() {
         val browser = this.browser ?: return
         val file = currentFile ?: return
 
         try {
-            val rawText = ApplicationManager.getApplication().runReadAction<String?> {
-                FileDocumentManager.getInstance().getDocument(file)?.text
-            } ?: return
+            withContext(Dispatchers.EDT) {
+                if (!project.isDisposed) {
+                    PsiDocumentManager.getInstance(project).commitAllDocuments()
+                }
+            }
 
-            val specJson = try {
-                convertToJson(rawText, file)
-            } catch (e: Exception) {
-                ApplicationManager.getApplication().invokeLater {
-                    browser.loadHTML(SwaggerPreviewHtmlBuilder.buildErrorHtml(e.message ?: "Parse error"))
+            val rawText = readAction {
+                if (project.isDisposed) null else FileDocumentManager.getInstance().getDocument(file)?.text
+            }
+
+            if (rawText.isNullOrBlank()) {
+                withContext(Dispatchers.EDT) {
+                    browser.loadHTML(SwaggerPreviewHtmlBuilder.buildInfoHtml("Empty File", "The active Swagger file is empty."))
+                    setStatus("Empty File")
                 }
                 return
             }
 
-            val assetsDir = SwaggerAssetsExtractor.ensureExtracted()
-            val html = SwaggerPreviewHtmlBuilder.buildPreviewHtml(specJson)
-            // Build a platform-independent file:// URL with File.toURI() — avoids Windows backslash/double-slash issues
-            val baseUrl = assetsDir.toPath().resolve("index.html").toUri().toString()
-            ApplicationManager.getApplication().invokeLater {
-                browser.loadHTML(html, baseUrl)
+            val specJson = try {
+                convertToJson(rawText, file)
+            } catch (e: Exception) {
+                val errorHtml = SwaggerPreviewHtmlBuilder.buildErrorHtml("YAML/JSON Parse Error:\n${e.message}")
+                withContext(Dispatchers.EDT) {
+                    if (!disposed && !project.isDisposed) {
+                        browser.loadHTML(errorHtml)
+                        setStatus("Error")
+                    }
+                }
+                return
             }
-        } catch (e: Exception) {
-            ApplicationManager.getApplication().invokeLater {
-                browser.loadHTML(SwaggerPreviewHtmlBuilder.buildErrorHtml(e.message ?: "Unexpected error"))
+
+            if (specJson != lastSpecJson.get() && specJson.isNotEmpty()) {
+                // [추가] JSON 파싱이 완료되고 리소스 추출 및 브라우저 로딩을 대기할 때 시각적 피드백 제공
+                setStatus("Rendering...")
+
+                lastSpecJson.set(specJson)
+
+                val assetsDir = withContext(Dispatchers.IO) {
+                    SwaggerAssetsExtractor.ensureExtracted()
+                }
+                val baseUrl = "${assetsDir.toPath().resolve("index.html").toUri()}?ts=${System.currentTimeMillis()}"
+                val html = SwaggerPreviewHtmlBuilder.buildPreviewHtml(specJson, assetsDir)
+
+                withContext(Dispatchers.EDT) {
+                    if (!disposed && !project.isDisposed) {
+                        browser.loadHTML(html, baseUrl)
+                        browser.component.revalidate()
+                        browser.component.repaint()
+                        setStatus("Rendered successfully")
+                        LOG.info("Specification successfully updated in browser.")
+                    }
+                }
+            } else {
+                // 내용 변화가 없어 업데이트를 건너뛰었다면 상태를 다시 성공 혹은 Ready로 복구합니다.
+                setStatus("Rendered successfully")
+            }
+        } catch (t: Throwable) {
+            if (t !is CancellationException) {
+                LOG.error("Render error in YAML/JSON panel", t)
+                withContext(Dispatchers.EDT) {
+                    if (!disposed && !project.isDisposed) {
+                        browser.loadHTML(SwaggerPreviewHtmlBuilder.buildErrorHtml(t.message ?: "Unexpected render error"))
+                        setStatus("Error")
+                    }
+                }
             }
         }
     }
 
-    // Normalizes raw YAML/JSON text into a JSON string. Swagger UI only accepts JSON, so the format is determined by extension and converted.
     private fun convertToJson(rawText: String, file: VirtualFile): String {
         val ext = file.extension?.lowercase()
         val node = if (ext == "yaml" || ext == "yml") {
@@ -148,8 +248,14 @@ class SwaggerViewerYamlPanel(private val project: Project) : JPanel(BorderLayout
         return jsonMapper.writeValueAsString(node)
     }
 
-    // Global document listener cleanup is handled automatically via the Disposable link in setupDocumentListener.
+    private fun setStatus(text: String) {
+        ApplicationManager.getApplication().invokeLater({
+            if (!disposed && !project.isDisposed) statusLabel.text = text
+        }, ModalityState.any())
+    }
+
     override fun dispose() {
-        browser?.dispose()
+        disposed = true
+        panelJob.cancel()
     }
 }

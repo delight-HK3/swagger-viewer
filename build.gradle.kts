@@ -24,8 +24,6 @@ dependencies {
         // Java PSI (AnnotatedElementsSearch 등) - Spring Boot 어노테이션 스캔에 필요
         bundledPlugin("com.intellij.java")
 
-        instrumentationTools()
-        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
     }
 
     // YAML -> JSON 변환용 (IntelliJ 플랫폼에 Jackson이 포함되어 있지만, 명시적으로 추가해 버전 충돌 방지)
@@ -41,18 +39,24 @@ intellijPlatform {
         description = providers.fileContents(layout.projectDirectory.file("docs/marketplaces/jetbrains/en.md")).asText
         ideaVersion {
             sinceBuild = "242"
-            untilBuild = "243.*"
+            untilBuild.set(null as String?)
         }
     }
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
 }
 
 tasks {
     withType<JavaCompile> {
-        sourceCompatibility = "17"
-        targetCompatibility = "17"
+        sourceCompatibility = "21"
+        targetCompatibility = "21"
     }
+}
+
+tasks.runIde {
+    // 락 방지 및 캐시 안정성 향상
+    jvmArgs("-Didea.is.internal=true", "-Xmx2g")
+    systemProperty("idea.gradle.jvmcompat.update", "false")
 }
