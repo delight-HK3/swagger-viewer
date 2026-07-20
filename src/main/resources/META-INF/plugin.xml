@@ -1,7 +1,14 @@
 <idea-plugin>
-    <id>com.github.swaggerViewer</id>
+    <id>com.github.delight-HK3.swagger-viewer</id>
     <name>Swagger Viewer</name>
-    <vendor>delight-HK3</vendor>
+    <vendor email="dabin49140@gmail.com" url="https://github.com/delight-HK3">delight-HK3</vendor>
+
+    <!-- Base platform — required for Tool Window, PSI, Document API -->
+    <depends>com.intellij.modules.platform</depends>
+    <!-- Java PSI — required for @RestController / @Operation annotation parsing -->
+    <depends>com.intellij.java</depends>
+    <!-- YAML plugin — required for OpenAPI spec file (.yaml/.yml) preview -->
+    <depends>org.jetbrains.plugins.yaml</depends>
 
     <extensions defaultExtensionNs="com.intellij">
 
