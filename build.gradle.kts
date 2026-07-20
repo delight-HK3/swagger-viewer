@@ -50,11 +50,29 @@ intellijPlatform {
         }.get()
         vendor {
             name = "delight-HK3"
+            email = "dabin49140@gmail.com"
             url = "https://github.com/delight-HK3"
         }
+        changeNotes = """
+            <h3>1.0.0 - Initial Release</h3>
+            <ul>
+                <li>Real-time Swagger annotation preview via PSI static analysis (no build or app launch required)</li>
+                <li>Supports @Operation, @ApiResponse, @Parameter, @OpenAPIDefinition and more</li>
+                <li>OpenAPI YAML/JSON spec file preview in Tool Window</li>
+                <li>Works on both IntelliJ IDEA Community and Ultimate</li>
+            </ul>
+        """.trimIndent()
         ideaVersion {
             sinceBuild = "242"
             untilBuild.set(null as String?)
+        }
+    }
+    pluginVerification {
+        ides {
+            // sinceBuild(242) 기준 최소 지원 버전
+            ide("IC", "2024.2.6")
+            // 현재 개발 대상 버전
+            ide("IC", "2024.3")
         }
     }
 }
