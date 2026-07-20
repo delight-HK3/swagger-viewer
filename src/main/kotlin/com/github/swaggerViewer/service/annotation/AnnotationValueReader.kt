@@ -9,8 +9,16 @@ import com.intellij.psi.PsiModifier
 import com.intellij.psi.PsiReferenceExpression
 
 /**
- * Low-level utility for reading PSI annotation attribute values as Kotlin primitive types.
- * Has no model type dependencies.
+ * [step 05-A-1] Lowest-level PSI utility — extracts raw annotation attribute values
+ * from the PSI tree as Kotlin primitive types (String, Boolean, List<String>).
+ *
+ * Handles the four shapes a PSI annotation value can take:
+ *  - String literal: `"hello"` → [com.intellij.psi.PsiLiteralExpression]
+ *  - Array initializer: `{"a", "b"}` → [com.intellij.psi.PsiArrayInitializerMemberValue]
+ *  - Static field reference: `MediaType.APPLICATION_JSON_VALUE` → [com.intellij.psi.PsiReferenceExpression]
+ *  - Nested annotation: treated as [com.intellij.psi.PsiAnnotation] by [parseAnnotationArray]
+ *
+ * Has no model or parser dependencies — all other parsers in [step 05-A-*] depend on this class.
  */
 class AnnotationValueReader {
 

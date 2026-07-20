@@ -25,6 +25,24 @@ import kotlin.coroutines.resume
 
 private val LOG = Logger.getInstance(SwaggerViewerToolWindowFactory::class.java)
 
+/**
+ * [step 01] Plugin entry point — detects what type of Swagger content the project contains
+ * and creates the appropriate preview tab(s) in the Tool Window.
+ *
+ * Waits for IntelliJ's smart mode (index ready) before scanning, because PSI search APIs
+ * ([PsiSearchHelper], [FilenameIndex]) require a complete index to return reliable results.
+ *
+ * Detection logic:
+ *  - `.java` / `.kt` source files containing `"swagger"` or `"RestController"` keyword
+ *    → adds **Annotation** tab → [SwaggerViewerPanel] [step 02-A]
+ *  - `.yaml` / `.yml` / `.json` files identified as Swagger/OpenAPI specs by [SwaggerSpecDetector]
+ *    → adds **YAML** tab → [SwaggerViewerYamlPanel] [step 02-Y]
+ *
+ * Both tabs can coexist if the project has both annotations and spec files.
+ *
+ * @see SwaggerViewerPanel
+ * @see SwaggerViewerYamlPanel
+ */
 class SwaggerViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {

@@ -18,12 +18,27 @@ import com.github.swaggerViewer.model.swagger.Server
 import com.fasterxml.jackson.databind.ObjectMapper
 
 /**
- * Serializes a [ScanResult] (produced by PSI annotation scanning) into an OpenAPI 3.0.0 JSON string.
- * Used by SwaggerViewerPanel (annotation-based preview) — not used for YAML/JSON spec files,
- * which are rendered directly by SwaggerViewerYamlPanel.
+ * [step 07-A] Serializer — converts a [ScanResult] produced by [SwaggerAnnotationScanner]
+ * into a complete OpenAPI 3.0.0 JSON string.
  *
- * Each build* method converts one OpenAPI spec object to a Map.
- * LinkedHashMap is used throughout so field insertion order equals spec output order.
+ * Has no PSI dependencies; operates entirely on the Kotlin model types from the `model` package.
+ * Not used for YAML/JSON spec files — those are converted directly in
+ * [com.github.swaggerViewer.view.SwaggerViewerYamlPanel] [step 02-Y].
+ *
+ * ## Output structure
+ * Follows the OAS 3.0 object hierarchy in canonical section order:
+ * `openapi` → `info` → `servers` → `tags` → `paths` → `components`
+ *
+ * [LinkedHashMap] is used throughout so the field order in the output JSON is deterministic
+ * and matches the canonical OAS spec section order.
+ *
+ * ## Key serialization rules
+ *  - `@Schema(implementation = Foo.class)` → `$ref: "#/components/schemas/Foo"` (type omitted;
+ *    `$ref` and `type` cannot coexist in OAS 3.0)
+ *  - `x-` extension fields are merged at the top level of the operation object
+ *  - Empty responses default to `{ "200": { "description": "OK" } }`
+ *
+ * @see com.github.swaggerViewer.view.SwaggerPreviewHtmlBuilder
  */
 class SwaggerAnnotationSerializer {
 

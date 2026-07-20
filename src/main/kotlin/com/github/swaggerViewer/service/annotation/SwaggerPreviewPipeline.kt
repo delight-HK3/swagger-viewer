@@ -4,15 +4,24 @@ import com.github.swaggerViewer.model.ScanResult
 import com.intellij.openapi.project.Project
 
 /**
- * Entry point for the annotation-based Swagger preview pipeline.
+ * [step 03-A] Annotation pipeline facade — the single entry point that [SwaggerViewerPanel]
+ * calls to drive the full annotation-based preview pipeline.
  *
- * Pipeline stages:
- *   1. [SwaggerAnnotationScanner]    — PSI 트리에서 Spring MVC + Swagger 어노테이션 수집 → [com.github.swaggerViewer.model.ScanResult]
- *   2. [PsiSchemaAnalyzer]           — 참조된 클래스 필드 타입 분석 (Scanner 내부에서 호출)
- *   3. [SwaggerAnnotationSerializer] — [com.github.swaggerViewer.model.ScanResult] → OpenAPI 3.0.0 JSON 직렬화
+ * Pipeline stages (in order):
+ *  1. [scan] → [SwaggerAnnotationScanner] [step 04-A]: traverses the PSI tree and collects all
+ *     Spring MVC + Swagger annotations into a [com.github.swaggerViewer.model.ScanResult].
+ *     [PsiSchemaAnalyzer] [step 06-A] is invoked internally at the end of the scan.
+ *  2. [buildSpec] → [SwaggerAnnotationSerializer] [step 07-A]: serializes the [ScanResult]
+ *     to an OpenAPI 3.0.0 JSON string.
  *
- * The [View layer][com.github.swaggerViewer.view.SwaggerViewerPanel] calls [scan] and [buildSpec]
- * separately so it can inspect path count between the two steps (e.g. to show an empty-state message).
+ * The two steps are exposed as separate methods so the caller can inspect intermediate state
+ * (e.g. check whether any paths were found) between them.
+ *
+ * Must be called inside a [com.intellij.openapi.application.ReadAction] — guaranteed by
+ * [SwaggerViewerPanel] [step 02-A].
+ *
+ * @see SwaggerAnnotationScanner
+ * @see SwaggerAnnotationSerializer
  */
 class SwaggerPreviewPipeline(project: Project) {
 

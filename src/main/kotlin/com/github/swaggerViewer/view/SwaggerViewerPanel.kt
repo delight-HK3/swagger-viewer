@@ -4,7 +4,7 @@ import com.github.swaggerViewer.service.annotation.SwaggerPreviewPipeline
 import com.github.swaggerViewer.service.common.SwaggerAssetsExtractor
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.EDT // [수정 포인트] 이 임포트가 있어야 Dispatchers.EDT 가 올바르게 확장 함수로 동작합니다.
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.diagnostic.Logger
@@ -39,6 +39,31 @@ import kotlin.time.Duration.Companion.milliseconds
 
 private val LOG = Logger.getInstance(SwaggerViewerPanel::class.java)
 
+
+/**
+ * [step 02-A] Annotation-based preview panel — renders a live Swagger UI preview
+ * derived from Spring MVC and Swagger annotations in the project source files.
+ *
+ * ## Trigger → Debounce → Pipeline
+ * Two event sources feed a [kotlinx.coroutines.flow.MutableSharedFlow]:
+ *  - [com.intellij.openapi.editor.event.DocumentListener]: fires on every keystroke in any `.java` / `.kt` file
+ *  - [com.intellij.openapi.vfs.newvfs.BulkFileListener]: fires on VFS-level file save events
+ *
+ * Events are debounced (800 ms) and processed with `collectLatest`, so a new change cancels
+ * any in-flight scan before starting fresh.
+ *
+ * ## Threading model
+ *  - [com.intellij.psi.PsiDocumentManager.commitAllDocuments] runs on EDT to flush
+ *    in-memory edits into the PSI tree before scanning.
+ *  - [com.intellij.openapi.application.readAction] runs the full PSI scan + JSON serialization
+ *    on a background thread under a read lock.
+ *  - [com.intellij.ui.jcef.JBCefBrowser.loadHTML] runs back on EDT.
+ *
+ * Skips re-rendering if the generated JSON is identical to the previous result ([lastSpecJson]).
+ *
+ * @see SwaggerPreviewPipeline
+ * @see SwaggerPreviewHtmlBuilder
+ */
 class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
 
     private val browser: JBCefBrowser? = if (JBCefApp.isSupported()) JBCefBrowser() else null
@@ -127,6 +152,7 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
         refreshRequests.tryEmit(Unit)
     }
 
+
     @OptIn(FlowPreview::class)
     private fun startRefreshPipeline() {
         coroutineScope.launch {
@@ -136,7 +162,6 @@ class SwaggerViewerPanel(private val project: Project) : JPanel(BorderLayout()),
                     if (project.isDisposed || disposed) return@collectLatest
 
                     try {
-                        // [수정 포인트] Dispatchers.EDT 문법으로 통일하여 수신 객체 불일치(Receiver mismatch) 에러를 방지합니다.
                         withContext(Dispatchers.EDT) {
                             PsiDocumentManager.getInstance(project).commitAllDocuments()
                         }

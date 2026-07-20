@@ -39,6 +39,31 @@ import kotlin.time.Duration.Companion.milliseconds
 
 private val LOG = Logger.getInstance(SwaggerViewerYamlPanel::class.java)
 
+/**
+ * [step 02-Y] YAML/JSON spec preview panel — renders a live Swagger UI preview
+ * for the currently active `.yaml`, `.yml`, or `.json` OpenAPI spec file.
+ *
+ * Unlike [SwaggerViewerPanel] [step 02-A], this panel does **not** use PSI: it reads the raw
+ * file text and converts it to JSON via Jackson, with no annotation scanning involved.
+ *
+ * ## File tracking
+ * [com.intellij.openapi.fileEditor.FileEditorManagerListener] tracks editor focus changes.
+ * Only files accepted by [SwaggerSpecDetector] are previewed; switching to a non-spec file
+ * leaves the current preview unchanged.
+ *
+ * ## Trigger → Debounce → Pipeline
+ * [com.intellij.openapi.editor.event.DocumentListener] fires only when `event.document`
+ * matches [currentFile], avoiding spurious refreshes from unrelated editors.
+ * Events are debounced (800 ms) with `collectLatest`.
+ *
+ * ## Conversion
+ * YAML input is parsed by [com.fasterxml.jackson.dataformat.yaml.YAMLFactory] and re-serialized
+ * as JSON. JSON input is parsed directly. The resulting JSON string is passed to
+ * [SwaggerPreviewHtmlBuilder] [step 08] — the same HTML builder used by the annotation flow.
+ *
+ * @see SwaggerSpecDetector
+ * @see SwaggerPreviewHtmlBuilder
+ */
 class SwaggerViewerYamlPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
 
     private val browser: JBCefBrowser? = if (JBCefApp.isSupported()) JBCefBrowser() else null

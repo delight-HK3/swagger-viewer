@@ -3,6 +3,26 @@ package com.github.swaggerViewer.view
 import java.io.File
 import java.util.Base64
 
+/**
+ * [step 08] Terminal step — assembles the HTML page that hosts Swagger UI and loads it
+ * into the JCEF browser. This is the last step in both the annotation and YAML flows.
+ *
+ * Receives a complete OpenAPI 3.0.0 JSON string from either upstream:
+ *  - Annotation flow: produced by [SwaggerAnnotationSerializer] [step 07-A]
+ *  - YAML flow: produced by Jackson YAML→JSON conversion in [SwaggerViewerYamlPanel] [step 02-Y]
+ *
+ * ## Asset resolution
+ * Swagger UI static files (CSS, JS bundles) are extracted from the plugin JAR to a temp
+ * directory by [com.github.swaggerViewer.service.common.SwaggerAssetsExtractor] and referenced
+ * as `file://` URIs. This avoids network access and satisfies the JetBrains Marketplace
+ * data-collection policy.
+ *
+ * ## JSON injection
+ * The spec JSON is Base64-encoded before being inlined into the HTML `<script>` block.
+ * This prevents any special characters (backticks, `</script>` sequences, multibyte UTF-8)
+ * from breaking the surrounding JavaScript. The browser decodes it at runtime with
+ * `atob()` + `TextDecoder("utf-8")`.
+ */
 internal object SwaggerPreviewHtmlBuilder {
 
     /**
