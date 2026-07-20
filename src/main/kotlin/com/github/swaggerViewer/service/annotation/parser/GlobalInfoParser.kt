@@ -15,11 +15,15 @@ import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiMethod
 
 /**
- * Parses document-level and class-level Swagger/Spring annotations:
- *   - @Info (contact, license) from @OpenAPIDefinition
- *   - @Server / @ServerVariable
- *   - @Tag on a controller class
- *   - Spring MVC routing info (@RequestMapping, @GetMapping, etc.)
+ * [step 05-A-2] Parses document-level and class-level annotations:
+ *  - `@OpenAPIDefinition` → title, version, description, contact, license
+ *  - `@Server` / `@ServerVariable` → server list
+ *  - `@Tag` on a controller class → tag name, description, externalDocs
+ *  - Spring MVC routing annotations → HTTP verb and URL path
+ *
+ * Also exposes [parseExternalDoc] and [parseServer] as `internal` methods shared with
+ * [OperationParser] [step 05-A-9], [ResponseParser] [step 05-A-6], and
+ * [CallbackParser] [step 05-A-8].
  */
 class GlobalInfoParser(private val reader: AnnotationValueReader) {
 
@@ -82,7 +86,7 @@ class GlobalInfoParser(private val reader: AnnotationValueReader) {
         return verb to path
     }
 
-    // internal: also used by OperationParser for the @Server nested inside @Link
+    // internal: also used by ResponseParser (@Link.server) and CallbackParser
     internal fun parseServer(ann: PsiAnnotation): Server? {
         val url = reader.getAnnotationStringValue(ann, "url")?.takeIf { it.isNotBlank() } ?: return null
         val desc = reader.getAnnotationStringValue(ann, "description")
@@ -101,7 +105,8 @@ class GlobalInfoParser(private val reader: AnnotationValueReader) {
         }.toMap()
 
     // Extracts @ExternalDocumentation from the given attribute of an annotation. Returns null if url is missing.
-    private fun parseExternalDoc(ann: PsiAnnotation?, attribute: String): ExternalDocumentation? {
+    // internal: also used by CallbackParser and OperationParser
+    internal fun parseExternalDoc(ann: PsiAnnotation?, attribute: String): ExternalDocumentation? {
         if (ann == null) return null
         val extDocAnn = ann.findAttributeValue(attribute) as? PsiAnnotation ?: return null
         val url = reader.getAnnotationStringValue(extDocAnn, "url")?.takeIf { it.isNotBlank() } ?: return null

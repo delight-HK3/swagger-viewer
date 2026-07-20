@@ -8,9 +8,13 @@ import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
 
 /**
- * Parses security-related Swagger annotations:
- *   - @SecurityScheme / @SecuritySchemes → OasSecurityScheme (for components/securitySchemes)
- *   - @SecurityRequirement / @SecurityRequirements → SecurityRequirement list (per-operation or per-class)
+ * [step 05-A-3] Parses security-related Swagger annotations:
+ *  - `@SecurityScheme` / `@SecuritySchemes` → [OasSecurityScheme] entries for `components/securitySchemes`
+ *  - `@SecurityRequirement` / `@SecurityRequirements` → [SecurityRequirement] lists for operations and classes
+ *
+ * Handles both the single-annotation form and the repeatable container form for each type.
+ * Class-level security requirements extracted here serve as the inherited default when a method
+ * defines no security of its own — the merge is applied by [OperationParser] [step 05-A-9].
  */
 class SecurityParser(private val reader: AnnotationValueReader) {
 

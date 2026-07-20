@@ -21,15 +21,27 @@ private const val NOT_NULL_JAKARTA = "jakarta.validation.constraints.NotNull"
 private const val NOT_NULL_JB = "org.jetbrains.annotations.NotNull"
 
 /**
- * Analyzes PSI classes referenced via @Schema(implementation = Foo.class) and builds
- * SchemaDefinition objects for the OpenAPI components/schemas section.
+ * [step 06-A] Schema analyzer — takes the set of class names collected by
+ * [SwaggerAnnotationScanner] [step 04-A] and builds full [SchemaDefinition] objects
+ * for the `components/schemas` section.
  *
- * - Reads class-level @Schema(description) for the schema description.
- * - Reads field-level @Schema(description, example) to enrich each property.
- * - Traverses the class graph via BFS: if UserResponse has a field of type Address,
- *   Address is enqueued and analyzed automatically.
+ * ## BFS traversal
+ * Starting from the root class names (referenced via `@Schema(implementation = Foo.class)`),
+ * each class's fields are inspected. If a field's type is itself a project class, that class
+ * is enqueued for analysis. This continues until no new classes are discovered.
  *
- * Must be called inside a ReadAction (guaranteed by SwaggerAnnotationScanner).
+ * ## Field analysis
+ *  - Primitive and well-known JDK types are mapped to OAS `type` + `format` pairs.
+ *  - Collection / Map types produce `type: array` or `type: object` schemas.
+ *  - Unknown class types produce a `$ref` pointing to `components/schemas/{ClassName}`.
+ *  - Enum classes produce `type: string` with an `enum` values list.
+ *  - `@NotNull` (javax / jakarta / JetBrains) on a field adds the field name to `required`.
+ *  - `@Schema(description, example)` on a field enriches the property.
+ *
+ * Uses [com.intellij.psi.search.PsiShortNamesCache] for index-based class lookup by simple name.
+ * Must be called inside a ReadAction — guaranteed by [SwaggerAnnotationScanner] [step 04-A].
+ *
+ * @see SwaggerAnnotationSerializer
  */
 class PsiSchemaAnalyzer(project: Project) {
 

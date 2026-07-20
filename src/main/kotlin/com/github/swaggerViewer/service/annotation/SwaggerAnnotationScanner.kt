@@ -5,8 +5,13 @@ import com.github.swaggerViewer.model.ScanResult
 import com.github.swaggerViewer.model.swagger.OasSecurityScheme
 import com.github.swaggerViewer.model.swagger.Operation
 import com.github.swaggerViewer.model.swagger.Tag
+import com.github.swaggerViewer.service.annotation.parser.CallbackParser
+import com.github.swaggerViewer.service.annotation.parser.ExtensionParser
 import com.github.swaggerViewer.service.annotation.parser.GlobalInfoParser
 import com.github.swaggerViewer.service.annotation.parser.OperationParser
+import com.github.swaggerViewer.service.annotation.parser.ParameterParser
+import com.github.swaggerViewer.service.annotation.parser.ResponseParser
+import com.github.swaggerViewer.service.annotation.parser.SchemaAnnotationParser
 import com.github.swaggerViewer.service.annotation.parser.SecurityParser
 
 import com.intellij.openapi.project.Project
@@ -18,21 +23,42 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.AnnotatedElementsSearch
 
 /**
- * Parses Spring MVC + Swagger annotations via PSI tree traversal only.
- * Performs static analysis without runtime execution; must be called within a ReadAction context.
+ * [step 04-A] PSI scanner — traverses the entire project's PSI tree to locate every
+ * Spring MVC controller and Swagger annotation, then assembles a [ScanResult].
  *
- * Delegates parsing details to three collaborators in the `parser` subpackage:
- *   - [AnnotationValueReader] : low-level PSI value reading
- *   - [GlobalInfoParser]      : document-level info, servers, tags, Spring routing
- *   - [SecurityParser]        : security schemes and requirements
- *   - [OperationParser]       : operations, parameters, request body, responses, callbacks
+ * ## How classes are located
+ * Uses [com.intellij.psi.search.searches.AnnotatedElementsSearch] for index-based lookups
+ * rather than scanning files one by one. Two sources are merged:
+ *  - Classes annotated with `@RestController` / `@Controller`
+ *  - Classes whose methods carry `@Operation` (catches non-controller classes)
+ *
+ * ## Parsing delegation
+ * Once a target [com.intellij.psi.PsiClass] / [com.intellij.psi.PsiMethod] is located,
+ * parsing is fully delegated to the `parser` subpackage [step 05-A-*]:
+ *  - [GlobalInfoParser] [step 05-A-2]  — `@OpenAPIDefinition`, `@Server`, `@Tag`, Spring routing
+ *  - [SecurityParser] [step 05-A-3]    — `@SecurityScheme`, `@SecurityRequirement`
+ *  - [OperationParser] [step 05-A-9]   — `@Operation` and all nested annotations
+ *
+ * ## Schema collection
+ * After all operations are collected, [PsiSchemaAnalyzer] [step 06-A] is invoked with the
+ * set of class names referenced via `@Schema(implementation = ...)`.
+ *
+ * Must be called inside a ReadAction.
+ *
+ * @see OperationParser
+ * @see PsiSchemaAnalyzer
  */
 class SwaggerAnnotationScanner(private val project: Project) {
 
     private val reader = AnnotationValueReader()
     private val globalParser = GlobalInfoParser(reader)
     private val securityParser = SecurityParser(reader)
-    private val operationParser = OperationParser(reader, securityParser, globalParser)
+    private val schemaParser = SchemaAnnotationParser(reader)
+    private val extensionParser = ExtensionParser(reader)
+    private val parameterParser = ParameterParser(reader, schemaParser)
+    private val responseParser = ResponseParser(reader, globalParser, schemaParser)
+    private val callbackParser = CallbackParser(reader, schemaParser, parameterParser, responseParser, extensionParser, securityParser, globalParser)
+    private val operationParser = OperationParser(reader, securityParser, globalParser, schemaParser, parameterParser, responseParser, callbackParser, extensionParser)
 
     fun scan(): ScanResult {
         val scope = GlobalSearchScope.projectScope(project)
