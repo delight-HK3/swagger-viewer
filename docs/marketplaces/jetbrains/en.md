@@ -13,7 +13,8 @@ This plugin was developed to let you see how the documentation looks in advance,
 ### Real-Time Annotation Preview
 - **Spring projects only** — targets Java/Kotlin projects based on Spring Boot or Spring MVC
 - Scans Swagger annotations in `@RestController` / `@Controller` classes via PSI static analysis
-- Supports `@Operation`, `@ApiResponse`, `@Parameter`, `@RequestBody`, `@OpenAPIDefinition`, and more
+- Supports `@Operation`, `@ApiResponse`, `@Parameter`, `@OpenAPIDefinition`, and more
+- Supports OAS request body via `@Operation(requestBody = @RequestBody(...))` (Spring `@RequestBody` is not recognized)
 - The Swagger UI preview in the Tool Window updates instantly as you type — no build, save, or app launch needed
 
 ### YAML / JSON Spec File Preview
@@ -28,7 +29,7 @@ This plugin was developed to let you see how the documentation looks in advance,
 
 ## Requirements
 
-- JetBrains IDE 2024.3 or later
+- JetBrains IDE 2024.2 or later
 - Spring Boot / Spring MVC based project (required for annotation preview)
 
 ## Getting Started
