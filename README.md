@@ -67,6 +67,12 @@ Typing (DocumentListener)
 
 ---
 
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a PR.
+
+---
+
 ## Project Structure
 
 ```
