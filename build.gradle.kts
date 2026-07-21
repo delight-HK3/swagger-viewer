@@ -54,6 +54,11 @@ intellijPlatform {
             url = "https://github.com/delight-HK3"
         }
         changeNotes = """
+            <h3>1.0.1 - Fix compatibility</h3>
+            <ul>
+                <li>Updated compatibility for the latest IntelliJ IDEA version.</li>
+                <li>replace implicit Query.iterator() calls with findAll()/findFirst()</li>
+            </ul>
             <h3>1.0.0 - Initial Release</h3>
             <ul>
                 <li>Real-time Swagger annotation preview via PSI static analysis (no build or app launch required)</li>
