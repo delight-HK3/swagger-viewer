@@ -106,7 +106,7 @@ class SwaggerAnnotationScanner(private val project: Project) {
         projectScope: GlobalSearchScope
     ): PsiAnnotation? {
         val annClass = facade.findClass(Annotation.OPEN_API_DEFINITION.fqn, allScope) ?: return null
-        val configClass = AnnotatedElementsSearch.searchPsiClasses(annClass, projectScope).firstOrNull() ?: return null
+        val configClass = AnnotatedElementsSearch.searchPsiClasses(annClass, projectScope).findFirst() ?: return null
         return configClass.getAnnotation(Annotation.OPEN_API_DEFINITION.fqn)
     }
 
@@ -124,7 +124,7 @@ class SwaggerAnnotationScanner(private val project: Project) {
         val controllerQNames = controllerClasses.mapNotNull { it.qualifiedName }.toHashSet()
         val operationAnnotation = facade.findClass(Annotation.OPERATION.fqn, allScope)
         val extraClasses: List<PsiClass> = if (operationAnnotation != null) {
-            AnnotatedElementsSearch.searchPsiMethods(operationAnnotation, scope).toList()
+            AnnotatedElementsSearch.searchPsiMethods(operationAnnotation, scope).findAll()
                 .mapNotNull { it.containingClass }
                 .filter { it.qualifiedName !in controllerQNames }
                 .distinctBy { it.qualifiedName }
@@ -177,7 +177,7 @@ class SwaggerAnnotationScanner(private val project: Project) {
         projectScope: GlobalSearchScope
     ): List<PsiClass> {
         val annotationClass = facade.findClass(fqn, allScope) ?: return emptyList()
-        return AnnotatedElementsSearch.searchPsiClasses(annotationClass, projectScope).toList()
+        return AnnotatedElementsSearch.searchPsiClasses(annotationClass, projectScope).findAll().toList()
     }
 
     // Collects all @SecurityScheme and @SecuritySchemes definitions from the project.
@@ -193,7 +193,7 @@ class SwaggerAnnotationScanner(private val project: Project) {
         // @SecuritySchemes container (processed first so single @SecurityScheme takes priority via putIfAbsent)
         val multiAnnClass = facade.findClass(Annotation.SECURITY_SCHEMES.fqn, allScope)
         if (multiAnnClass != null) {
-            for (cls in AnnotatedElementsSearch.searchPsiClasses(multiAnnClass, projectScope)) {
+            for (cls in AnnotatedElementsSearch.searchPsiClasses(multiAnnClass, projectScope).findAll()) {
                 val ann = cls.getAnnotation(Annotation.SECURITY_SCHEMES.fqn) ?: continue
                 securityParser.extractSecuritySchemesFromContainer(ann).forEach { (name, scheme) ->
                     result.putIfAbsent(name, scheme)
@@ -204,7 +204,7 @@ class SwaggerAnnotationScanner(private val project: Project) {
         // Single @SecurityScheme
         val singleAnnClass = facade.findClass(Annotation.SECURITY_SCHEME.fqn, allScope)
         if (singleAnnClass != null) {
-            for (cls in AnnotatedElementsSearch.searchPsiClasses(singleAnnClass, projectScope)) {
+            for (cls in AnnotatedElementsSearch.searchPsiClasses(singleAnnClass, projectScope).findAll()) {
                 val ann = cls.getAnnotation(Annotation.SECURITY_SCHEME.fqn) ?: continue
                 val (name, scheme) = securityParser.parseSecuritySchemeAnnotation(ann) ?: continue
                 result[name] = scheme
