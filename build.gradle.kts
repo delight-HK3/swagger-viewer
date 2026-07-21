@@ -12,7 +12,7 @@ plugins {
 }
 
 group = "com.github"
-version = "1.0.0"
+version = "1.0.1"
 
 repositories {
     mavenCentral()
@@ -64,7 +64,7 @@ intellijPlatform {
         """.trimIndent()
         ideaVersion {
             sinceBuild = "242"
-            untilBuild.set(null as String?)
+            untilBuild = provider { null }
         }
     }
     pluginVerification {
